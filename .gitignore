@@ -1,1 +1,5 @@
+# Python 가상 환경
 venv/
+
+# Firebase 서비스 계정 JSON 파일
+firebase_service_account.json
