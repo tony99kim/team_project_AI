@@ -6,7 +6,7 @@ from datetime import datetime
 import requests  # requests 라이브러리 추가
 
 # Firebase Admin SDK 인증
-cred = credentials.Certificate('firebase_service_account.json')
+cred = credentials.Certificate('C:/Users/taeyeop/team_project_AI/firebase_service_account.json')
 firebase_admin.initialize_app(cred, {
     'storageBucket': 'team-project-12345.appspot.com'  # 실제 버킷 이름으로 변경
 })
@@ -23,7 +23,7 @@ def get_authentication_data():
 def get_image_urls(authentication_id):
     """해당 인증 ID에 대한 이미지 URL 가져오기"""
     image_urls = []
-    
+
     # Storage에서 해당 인증 ID의 이미지 경로를 가져와서 URL 생성
     blobs = bucket.list_blobs(prefix=f'PointAuthenticationImages/{authentication_id}/')
     for blob in blobs:
