@@ -1,87 +1,110 @@
+import torch
+from torch.utils.data import DataLoader, Dataset
+from transformers import BlipProcessor, BlipForConditionalGeneration
+from torchvision import transforms
+from PIL import Image
 import firebase_admin
-from firebase_admin import credentials
-from firebase_admin import firestore
-from firebase_admin import storage
-from datetime import datetime
-import requests  # requests 라이브러리 추가
+from firebase_admin import credentials, firestore, storage
+import logging
+import os
+
+# 로깅 설정
+logging.basicConfig(level=logging.INFO)
 
 # Firebase Admin SDK 인증
 cred = credentials.Certificate('C:/Users/taeyeop/team_project_AI/firebase_service_account.json')
 firebase_admin.initialize_app(cred, {
-    'storageBucket': 'team-project-12345.appspot.com'  # 실제 버킷 이름으로 변경
+    'storageBucket': 'team-project-12345.appspot.com' 
 })
 
 # Firestore 클라이언트 및 Storage 버킷 생성
 db = firestore.client()
 bucket = storage.bucket()
 
+# 데이터셋 클래스 정의
+class CustomDataset(Dataset):
+    def __init__(self, image_dir, captions):
+        self.image_dir = image_dir
+        self.captions = captions
+        self.transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+
+    def __len__(self):
+        return len(self.captions)
+
+    def __getitem__(self, idx):
+        img_path = os.path.join(self.image_dir, self.captions[idx]['image'])
+        image = Image.open(img_path).convert("RGB")
+        image = self.transform(image)
+        caption = self.captions[idx]['caption']
+        return image, caption
+
 def get_authentication_data():
     """Firestore에서 인증 데이터 가져오기 함수"""
-    docs = db.collection('pointAuthentications').stream()
-    return [doc.to_dict() for doc in docs]
+    approved_data = []
+    denied_description_mismatch_data = []
+    denied_title_mismatch_data = []
+    
+    # 승인된 인증글 가져오기
+    approved_docs = db.collection('pointAuthentications').where('status', '==', '승인').stream()
+    for doc in approved_docs:
+        approved_data.append(doc.to_dict())
+    
+    # 설명 불일치로 거부된 인증글 가져오기
+    denied_description_mismatch_docs = db.collection('pointAuthentications').where('status', '==', '승인 거부: 설명 불일치').stream()
+    for doc in denied_description_mismatch_docs:
+        denied_description_mismatch_data.append(doc.to_dict())
 
-def get_image_urls(authentication_id):
-    """해당 인증 ID에 대한 이미지 URL 가져오기"""
-    image_urls = []
-
-    # Storage에서 해당 인증 ID의 이미지 경로를 가져와서 URL 생성
-    blobs = bucket.list_blobs(prefix=f'PointAuthenticationImages/{authentication_id}/')
-    for blob in blobs:
-        image_urls.append(blob.public_url)  # 공개 URL 추가
-
-    return image_urls
-
-def analyze_data(title, description, images):
-    """AI 모델을 통한 데이터 분석 (API 호출)"""
-    response = requests.post('http://127.0.0.1:5000/api/evaluate', json={
-        'title': title,
-        'description': description,
-        'images': images
-    })
-
-    if response.status_code == 200:
-        return response.json().get('status')
-    else:
-        print('Error calling AI model:', response.status_code, response.text)
-        return None  # API 호출 실패 시 None 반환
-
-def update_authentication_status(authentication_id, status):
-    """인증 상태 업데이트 함수"""
-    db.collection('pointAuthentications').document(authentication_id).update({
-        'status': status,
-        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    })
-    print(f'Authentication ID {authentication_id} status updated to {status}')
+    # 제목 불일치로 거부된 인증글 가져오기
+    denied_title_mismatch_docs = db.collection('pointAuthentications').where('status', '==', '승인 거부: 제목과 설명 불일치').stream()
+    for doc in denied_title_mismatch_docs:
+        denied_title_mismatch_data.append(doc.to_dict())
+    
+    return approved_data, denied_description_mismatch_data, denied_title_mismatch_data
 
 def main():
-    # 인증 데이터 가져오기
-    authentication_data = get_authentication_data()
-    
-    for data in authentication_data:
-        authentication_id = data.get('authenticationId')  # 인증 ID 가져오기
-        if not authentication_id:
-            print('No authentication ID found for document:', data)
-            continue  # 인증 ID가 없으면 다음 문서로 넘어감
+    image_dir = 'path/to/images'  # 이미지 디렉토리
+    approved_data, denied_description_mismatch_data, denied_title_mismatch_data = get_authentication_data()
 
-        title = data.get('title', '')
-        description = data.get('description', '')
+    # 승인된 인증글과 거부된 인증글로부터 캡션 데이터 준비
+    captions = []
+    for data in approved_data:
+        captions.append({'image': data['image'], 'caption': data['description']})
+    for data in denied_description_mismatch_data:
+        captions.append({'image': data['image'], 'caption': data['description']})
+    for data in denied_title_mismatch_data:
+        captions.append({'image': data['image'], 'caption': data['description']})
 
-        # 이미지 URL 가져오기
-        image_urls = get_image_urls(authentication_id)
+    dataset = CustomDataset(image_dir, captions)
+    dataloader = DataLoader(dataset, batch_size=8, shuffle=True)
 
-        # 이미지가 없으면 상태 업데이트 하지 않음
-        if not image_urls:
-            print(f'No images found for Authentication ID {authentication_id}. Skipping...')
-            continue
+    # 모델 및 프로세서 로드
+    processor = BlipProcessor.from_pretrained("Salesforce/blip-vqa-base")
+    model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-vqa-base")
 
-        # AI 모델 분석 (API 호출)
-        status = analyze_data(title, description, image_urls)
+    # 훈련 설정
+    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5)
 
-        # API 호출이 성공적으로 이루어진 경우에만 상태 업데이트
-        if status:
-            update_authentication_status(authentication_id, status)
-        else:
-            print(f'Failed to analyze data for Authentication ID {authentication_id}. Skipping status update.')
+    # 훈련 루프
+    model.train()
+    for epoch in range(3):  # 에포크 수
+        for batch in dataloader:
+            images, captions = batch
+            outputs = model(images, captions=processor(captions, return_tensors="pt", padding=True, truncation=True).input_ids)
+            loss = outputs.loss
+            
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            logging.info(f'Epoch: {epoch}, Loss: {loss.item()}')
+
+    # 모델 저장
+    model.save_pretrained('path/to/save/model')
+    processor.save_pretrained('path/to/save/model')
 
 if __name__ == '__main__':
     main()
